@@ -2,55 +2,66 @@
 
 namespace derrickleemy\Auth;
 
+use \CoderCat\JWKToPEM\JWKConverter;
 use \Carbon\Carbon;
 use \Firebase\JWT\JWT;
-use CoderCat\JWKToPEM\JWKConverter;
 use \GuzzleHttp\Client;
 
 /**
  * Class CognitoToken
- *
- * @property string $token_id
- * @property string $user_id
- * @property boolean $expecting
- * @property int $start_at_unix
- * @property string $start_at
- * @property boolean $incorrect
- * @property int $created_at_unix
- * @property string $created_at
- * @property boolean $expired
- * @property int $expires_at_unix
- * @property string $expires_at
- * @property boolean $error
- * @property array $errors
- * @property boolean $valid
- *
  * @package derrickleemy\Auth
  */
 class CognitoToken
 {
+    private $authCode = null;
     private $jwt = null;
     private $properties = array();
 
-    public function __construct($jwt)
+    public function __construct($authCode)
     {
-        $this->jwt = $jwt;
-        $this->properties = static::jwtDecode($jwt);
+        $this->authCode = $authCode;
+        $this->jwt = static::getJwt($authCode);
+        $this->properties = static::jwtDecode($this->jwt);
     }
 
     /**
-     * Decode a Access Token
+     * Get the Json Web Token
      *
-     * @param string $access_token Access Token
+     * @param string $authCode Auth Code
+     *
+     * @return array
+     */
+    public static function getJwt($authCode)
+    {
+        $client = new Client();
+        $response = $client->post(env('AWS_COGNITO_DOMAIN') . '/oauth2/token', [
+            'headers' => [
+                'Authorization' => 'Basic ' . base64_encode(env('AWS_COGNITO_CLIENT_ID') . ':' . env('AWS_COGNITO_CLIENT_SECRET')),
+            ],
+            'form_params' => [
+                'grant_type' => 'authorization_code',
+                'code' => $authCode,
+                'client_id' => env('AWS_COGNITO_CLIENT_ID'),
+                'redirect_uri' => env('APP_URL'),
+            ],
+        ]);
+
+        $decodedResponse = json_decode($response->getBody()->getContents(), true);
+        $idToken = $decodedResponse['id_token'];
+
+        return $idToken;
+    }
+
+    /**
+     * Decode the Json Web Token
+     *
+     * @param string $jwt Json Web Token
      *
      * @return array
      */
     public static function jwtDecode($jwt)
     {
         $now = Carbon::now()->timestamp;
-        $expecting = false;
-        $incorrect = false;
-        $expired = false;
         $error = false;
         $errors = array();
         $decodedToken = array();
@@ -58,65 +69,70 @@ class CognitoToken
 
         $header = isset($token_segments[0]) ? json_decode(base64_decode($token_segments[0])) : null;
         $payload = isset($token_segments[1]) ? json_decode(base64_decode($token_segments[1])) : null;
-        $signature = isset($token_segments[2]) ? json_decode(base64_decode($token_segments[2])) : null;
 
-        // Local kid
-        $localKid = $header->kid;
-
-        // Public kid
-        $publicJwk = null;
-        $client = new Client();
-        $response = $client->get('https://cognito-idp.' . env('AWS_COGNITO_REGION') . '.amazonaws.com/' . env('AWS_COGNITO_USER_POOL_ID') . '/.well-known/jwks.json');
-        $decodedResponse = json_decode($response->getBody()->getContents(), true);
-
-        foreach ($decodedResponse['keys'] as $jwk) {
-            if ($jwk['kid'] == $localKid) {
-                $publicJwk = $jwk;
-                break;
-            }
-        }
-
-        $jwkConverter = new JWKConverter();
-        $pem = $jwkConverter->toPEM($publicJwk);
-        $decoded = JWT::decode($jwt, $pem, array('RS256'));
-
+        // If Token Segments != 3, do not continue processing
         if (count($token_segments) != 3) {
             $error = true;
             $errors[] = "Token has wrong number of segments";
-        }
-        if (null === $data = json_decode($payload)) {
-            $error = true;
-            $errors[] = "Decoder has problem with Token encoding";
-        }
-        if (isset($data->nbf) && $data->nbf > $now) {
-            $expecting = true;
-        }
-        if (isset($data->iat) && $data->iat > $now) {
-            $incorrect = true;
-        }
-        if (isset($data->exp) && $now >= $data->exp) {
-            $expired = true;
-            $errors[] = "Token has expired";
-        }
+        } else {
+            // Local kid
+            $localKid = $header->kid;
 
-        $decodedToken = array(
-            'token_id' => (isset($data->jti)) ? $data->jti : null,
-            'user_id' => (isset($data->sub)) ? $data->sub : null,
-            'expecting' => $expecting,
-            'start_at_unix' => (isset($data->nbf)) ? $data->nbf : null,
-            'start_at' => (isset($data->nbf)) ? Carbon::createFromTimestamp($data->nbf)->setTimezone('Asia/Singapore')->toDateTimeString() : null,
-            'incorrect' => $incorrect,
-            'created_at_unix' => (isset($data->iat)) ? $data->iat : null,
-            'created_at' => (isset($data->iat)) ? Carbon::createFromTimestamp($data->iat)->setTimezone('Asia/Singapore')->toDateTimeString() : null,
-            'expired' => $expired,
-            'expires_at_unix' => (isset($data->exp)) ? $data->exp : null,
-            'expires_at' => (isset($data->exp)) ? Carbon::createFromTimestamp($data->exp)->setTimezone('Asia/Singapore')->toDateTimeString() : null,
-            'error' => $error,
-            'errors' => $errors,
-            'valid' => ($expecting || $incorrect || $expired || $error) ? false : true,
-        );
+            // Public kid
+            $publicJwk = null;
+            $client = new Client();
+            $response = $client->get('https://cognito-idp.' . env('AWS_COGNITO_REGION') . '.amazonaws.com/' . env('AWS_COGNITO_USER_POOL_ID') . '/.well-known/jwks.json');
+            $decodedResponse = json_decode($response->getBody()->getContents(), true);
+
+            foreach ($decodedResponse['keys'] as $jwk) {
+                if ($jwk['kid'] == $localKid) {
+                    $publicJwk = $jwk;
+                    break;
+                }
+            }
+
+            $jwkConverter = new JWKConverter();
+            $pem = $jwkConverter->toPEM($publicJwk);
+            $decodedToken = JWT::decode($jwt, $pem, array('RS256'));
+
+            // Verify that the token is not expired
+            if (isset($decodedToken->iat) && $decodedToken->iat > $now) {
+                $error = true;
+                $errors[] = "Token cannot be issued after current time";
+            }
+
+            if (isset($decodedToken->exp) && $now >= $decodedToken->exp) {
+                $error = true;
+                $errors[] = "Token has already expired";
+            }
+
+            // Verify that the audience (aud) claim matches the app client ID created in the Amazon Cognito user pool.
+            if (isset($decodedToken->aud) && $decodedToken->aud != env('AWS_COGNITO_CLIENT_ID')) {
+                $error = true;
+                $errors[] = "Token does not match audience";
+            }
+
+            // Verify that the issuer (iss) claim matches your user pool.
+            if (isset($decodedToken->iss) && $decodedToken->iss != 'https://cognito-idp.' . env('AWS_COGNITO_REGION') . '.amazonaws.com/' . env('AWS_COGNITO_USER_POOL_ID')) {
+                $error = true;
+                $errors[] = "Token does not match user pool";
+            }
+
+            // Verify that the token_use claim matches 'id'
+            if (isset($decodedToken->token_use) && $decodedToken->token_use != 'id') {
+                $error = true;
+                $errors[] = "Token use claim is incorrect";
+            }
+
+            $decodedToken = array_merge((array) $decodedToken, ['error' => $error, 'errors' => $errors]);
+        }
 
         return $decodedToken;
+    }
+
+    public function getAuthCode()
+    {
+        return $this->authCode;
     }
 
     public function getToken()

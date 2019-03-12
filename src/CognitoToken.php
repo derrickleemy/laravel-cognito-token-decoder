@@ -4,6 +4,7 @@ namespace derrickleemy\Auth;
 
 use \Carbon\Carbon;
 use \Firebase\JWT\JWT;
+use CoderCat\JWKToPEM\JWKConverter;
 use \GuzzleHttp\Client;
 
 /**
